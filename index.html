@@ -578,18 +578,51 @@ const KANA = {
 // ═══════════════════════════════════════════════
 // DB — localStorage
 // ═══════════════════════════════════════════════
-// Schema per ogni kana:
-// { interval: days, ease: 2.5, due: timestamp, reps: n, correct: n, wrong: n }
-const DB_KEY = 'kana_trainer_v1';
+// Schema v2:
+// {
+//   v: 2,
+//   meta: { sessions, totalCorrect, totalWrong, streak, lastDay },
+//   cards: { "あ": { interval, ease, due, reps, correct, wrong }, ... }
+// }
+const DB_KEY = 'kana_trainer_v2';
+const DB_KEY_V1 = 'kana_trainer_v1';
+
+const EMPTY_DB = () => ({ v: 2, meta: { sessions: 0, totalCorrect: 0, totalWrong: 0, streak: 0, lastDay: null }, cards: {} });
+const EMPTY_CARD = () => ({ interval: 0, ease: 2.5, due: 0, reps: 0, correct: 0, wrong: 0 });
+
+function migrateV1(raw) {
+  const db = EMPTY_DB();
+  for (const [key, val] of Object.entries(raw)) {
+    if      (key === '__sessions')     db.meta.sessions     = val || 0;
+    else if (key === '__totalCorrect') db.meta.totalCorrect = val || 0;
+    else if (key === '__totalWrong')   db.meta.totalWrong   = val || 0;
+    else if (key === '__streak')       db.meta.streak       = val || 0;
+    else if (key === '__lastDay')      db.meta.lastDay      = val || null;
+    else if (!key.startsWith('_'))     db.cards[key]        = val;
+  }
+  return db;
+}
 
 function loadDB() {
-  try { return JSON.parse(localStorage.getItem(DB_KEY)) || {}; } catch { return {}; }
+  try {
+    const raw = localStorage.getItem(DB_KEY);
+    if (raw) return JSON.parse(raw);
+    // Migrate from v1 if present
+    const v1 = localStorage.getItem(DB_KEY_V1);
+    if (v1) {
+      const db = migrateV1(JSON.parse(v1));
+      saveDB(db);
+      localStorage.removeItem(DB_KEY_V1);
+      return db;
+    }
+    return EMPTY_DB();
+  } catch { return EMPTY_DB(); }
 }
 function saveDB(db) {
   localStorage.setItem(DB_KEY, JSON.stringify(db));
 }
 function getCard(db, ch) {
-  return db[ch] || { interval: 0, ease: 2.5, due: 0, reps: 0, correct: 0, wrong: 0 };
+  return db.cards[ch] || EMPTY_CARD();
 }
 
 // SM-2 simplified
@@ -688,7 +721,13 @@ function buildDeck() {
   const db = loadDB();
   const now = Date.now();
   const groups = mode === 'both' ? [...KANA.hiragana, ...KANA.katakana] : KANA[mode];
-  deck = [];
+
+  const makeEntry = (ch, rom, typeName) => {
+    const card = getCard(db, ch);
+    return { ch, rom, type: typeName, srsLevel: srsLevel(card), due: card.due };
+  };
+
+  let due = [], notDue = [];
   [...activeGroups].forEach(i => {
     const g = groups[i];
     if (!g) return;
@@ -696,21 +735,21 @@ function buildDeck() {
       ? (i < KANA.hiragana.length ? 'Hiragana' : 'Katakana')
       : (mode === 'hiragana' ? 'Hiragana' : 'Katakana');
     g.chars.forEach(([ch, rom]) => {
-      const card = getCard(db, ch);
-      // Include if new OR due
-      if (card.reps === 0 || card.due <= now) {
-        deck.push({ ch, rom, type: typeName, srsLevel: srsLevel(card) });
-      }
+      const entry = makeEntry(ch, rom, typeName);
+      if (entry.srsLevel === 0 || entry.due <= now) due.push(entry);
+      else notDue.push(entry);
     });
   });
-  // Sort: new cards first, then by due date ascending; shuffle within same priority
-  shuffle(deck);
-  // Put "due" cards before "new" ones to prioritise review
-  deck.sort((a, b) => {
-    const aNew = a.srsLevel === 0 ? 1 : 0;
-    const bNew = b.srsLevel === 0 ? 1 : 0;
-    return aNew - bNew;
-  });
+
+  if (due.length === 0) {
+    // All cards studied and not yet due: show them all sorted by soonest due
+    notDue.sort((a, b) => a.due - b.due);
+    deck = notDue;
+  } else {
+    shuffle(due);
+    due.sort((a, b) => (a.srsLevel === 0 ? 1 : 0) - (b.srsLevel === 0 ? 1 : 0));
+    deck = due;
+  }
 }
 
 function shuffle(arr) {
@@ -772,8 +811,7 @@ function flipCard() {
 function answer(correct) {
   // Save to DB
   const db = loadDB();
-  const card = getCard(db, currentCard.ch);
-  db[currentCard.ch] = sm2Update(card, correct);
+  db.cards[currentCard.ch] = sm2Update(getCard(db, currentCard.ch), correct);
   saveDB(db);
 
   // Update session globals
@@ -807,16 +845,15 @@ function showEnd() {
   // Record session in DB
   const db = loadDB();
   const today = new Date().toDateString();
-  db.__sessions = (db.__sessions || 0) + 1;
-  db.__totalCorrect = (db.__totalCorrect || 0) + good;
-  db.__totalWrong   = (db.__totalWrong || 0) + bad;
+  db.meta.sessions++;
+  db.meta.totalCorrect += good;
+  db.meta.totalWrong   += bad;
   // Streak
-  const last = db.__lastDay;
   const yesterday = new Date(Date.now() - 86400000).toDateString();
-  if (last === today) { /* same day, no change */ }
-  else if (last === yesterday) { db.__streak = (db.__streak || 0) + 1; }
-  else { db.__streak = 1; }
-  db.__lastDay = today;
+  if (db.meta.lastDay === today) { /* same day */ }
+  else if (db.meta.lastDay === yesterday) { db.meta.streak++; }
+  else { db.meta.streak = 1; }
+  db.meta.lastDay = today;
   saveDB(db);
 
   document.getElementById('cardArea').style.display = 'none';
@@ -837,20 +874,20 @@ function showEnd() {
 // ═══════════════════════════════════════════════
 function renderStats() {
   const db = loadDB();
-  const totalReps = (db.__totalCorrect || 0) + (db.__totalWrong || 0);
-  const acc = totalReps ? Math.round((db.__totalCorrect || 0) / totalReps * 100) : null;
+  const totalReps = db.meta.totalCorrect + db.meta.totalWrong;
+  const acc = totalReps ? Math.round(db.meta.totalCorrect / totalReps * 100) : null;
 
   // Count mature cards across all kana
   let matureCount = 0;
   const allChars = [...KANA.hiragana, ...KANA.katakana].flatMap(g => g.chars);
   allChars.forEach(([ch]) => { if (srsLevel(getCard(db, ch)) >= 4) matureCount++; });
 
-  document.getElementById('st-total').textContent   = totalReps;
-  document.getElementById('st-acc').textContent     = acc !== null ? acc + '%' : '—';
+  document.getElementById('st-total').textContent    = totalReps;
+  document.getElementById('st-acc').textContent      = acc !== null ? acc + '%' : '—';
   document.getElementById('st-mastered').textContent = matureCount;
-  document.getElementById('st-sessions').textContent = db.__sessions || 0;
-  document.getElementById('st-streak').textContent   = db.__streak || 0;
-  document.getElementById('st-lastday').textContent  = db.__lastDay ? 'Ultimo: ' + db.__lastDay : 'Mai studiato';
+  document.getElementById('st-sessions').textContent = db.meta.sessions;
+  document.getElementById('st-streak').textContent   = db.meta.streak;
+  document.getElementById('st-lastday').textContent  = db.meta.lastDay ? 'Ultimo: ' + db.meta.lastDay : 'Mai studiato';
 
   showKanaTable('hiragana', document.querySelector('.tab-sub-btn'));
 }
@@ -882,6 +919,7 @@ function showKanaTable(type, btn) {
 function confirmReset() {
   if (confirm('Sei sicuro? Tutti i progressi verranno cancellati.')) {
     localStorage.removeItem(DB_KEY);
+    localStorage.removeItem(DB_KEY_V1);
     renderStats();
   }
 }
@@ -909,28 +947,23 @@ function importData(event) {
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
-      const imported = JSON.parse(e.target.result);
+      let imported = JSON.parse(e.target.result);
       if (typeof imported !== 'object' || imported === null) throw new Error();
-      // Merge: per ogni kana, tieni il record con più ripetizioni (il più aggiornato)
-      const current = loadDB();
-      let merged = { ...current };
-      for (const [key, val] of Object.entries(imported)) {
-        if (key.startsWith('__')) {
-          // Metadati: somma i contatori, tieni lo streak più alto
-          if (key === '__sessions')      merged[key] = (current[key] || 0) + (val || 0);
-          else if (key === '__totalCorrect') merged[key] = (current[key] || 0) + (val || 0);
-          else if (key === '__totalWrong')   merged[key] = (current[key] || 0) + (val || 0);
-          else if (key === '__streak')    merged[key] = Math.max(current[key] || 0, val || 0);
-          else if (key === '__lastDay')   merged[key] = val; // prendi il più recente
-        } else {
-          // Dati kana: tieni il record con più ripetizioni
-          const cur = current[key];
-          if (!cur || (val.reps || 0) > (cur.reps || 0)) {
-            merged[key] = val;
-          }
-        }
+      // Normalize v1 export to v2 structure
+      if (!imported.v || imported.v < 2) imported = migrateV1(imported);
+      const cur = loadDB();
+      // Merge meta: sum counters, keep highest streak
+      cur.meta.sessions     += imported.meta.sessions     || 0;
+      cur.meta.totalCorrect += imported.meta.totalCorrect || 0;
+      cur.meta.totalWrong   += imported.meta.totalWrong   || 0;
+      cur.meta.streak        = Math.max(cur.meta.streak, imported.meta.streak || 0);
+      if (imported.meta.lastDay) cur.meta.lastDay = imported.meta.lastDay;
+      // Merge cards: keep record with more reps
+      for (const [ch, val] of Object.entries(imported.cards || {})) {
+        const existing = cur.cards[ch];
+        if (!existing || (val.reps || 0) > (existing.reps || 0)) cur.cards[ch] = val;
       }
-      saveDB(merged);
+      saveDB(cur);
       showFeedback('✓ Importato e unito correttamente', 'var(--green)');
       renderStats();
     } catch {
