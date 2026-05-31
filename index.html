@@ -721,7 +721,13 @@ function buildDeck() {
   const db = loadDB();
   const now = Date.now();
   const groups = mode === 'both' ? [...KANA.hiragana, ...KANA.katakana] : KANA[mode];
-  deck = [];
+
+  const makeEntry = (ch, rom, typeName) => {
+    const card = getCard(db, ch);
+    return { ch, rom, type: typeName, srsLevel: srsLevel(card), due: card.due };
+  };
+
+  let due = [], notDue = [];
   [...activeGroups].forEach(i => {
     const g = groups[i];
     if (!g) return;
@@ -729,21 +735,21 @@ function buildDeck() {
       ? (i < KANA.hiragana.length ? 'Hiragana' : 'Katakana')
       : (mode === 'hiragana' ? 'Hiragana' : 'Katakana');
     g.chars.forEach(([ch, rom]) => {
-      const card = getCard(db, ch);
-      // Include if new OR due
-      if (card.reps === 0 || card.due <= now) {
-        deck.push({ ch, rom, type: typeName, srsLevel: srsLevel(card) });
-      }
+      const entry = makeEntry(ch, rom, typeName);
+      if (entry.srsLevel === 0 || entry.due <= now) due.push(entry);
+      else notDue.push(entry);
     });
   });
-  // Sort: new cards first, then by due date ascending; shuffle within same priority
-  shuffle(deck);
-  // Put "due" cards before "new" ones to prioritise review
-  deck.sort((a, b) => {
-    const aNew = a.srsLevel === 0 ? 1 : 0;
-    const bNew = b.srsLevel === 0 ? 1 : 0;
-    return aNew - bNew;
-  });
+
+  if (due.length === 0) {
+    // All cards studied and not yet due: show them all sorted by soonest due
+    notDue.sort((a, b) => a.due - b.due);
+    deck = notDue;
+  } else {
+    shuffle(due);
+    due.sort((a, b) => (a.srsLevel === 0 ? 1 : 0) - (b.srsLevel === 0 ? 1 : 0));
+    deck = due;
+  }
 }
 
 function shuffle(arr) {
