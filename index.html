@@ -282,6 +282,43 @@
     letter-spacing: 0.5px;
   }
 
+  .io-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .btn-io {
+    flex: 1;
+    padding: 10px;
+    border-radius: 10px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+    border: 1px solid var(--border);
+    transition: all 0.2s;
+  }
+  .btn-export {
+    background: rgba(232,200,74,0.08);
+    border-color: rgba(232,200,74,0.3);
+    color: var(--accent);
+  }
+  .btn-export:hover { background: rgba(232,200,74,0.16); }
+  .btn-import {
+    background: rgba(74,196,138,0.08);
+    border-color: rgba(74,196,138,0.3);
+    color: var(--green);
+  }
+  .btn-import:hover { background: rgba(74,196,138,0.16); }
+  .io-feedback {
+    font-size: 11px;
+    min-height: 18px;
+    margin-bottom: 16px;
+    text-align: center;
+    letter-spacing: 0.5px;
+    transition: opacity 0.3s;
+  }
+
   .stat-cards {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -448,6 +485,13 @@
       <div class="stats-title">Progressi</div>
       <button class="btn-reset-all" onclick="confirmReset()">↺ Reset</button>
     </div>
+
+    <div class="io-bar">
+      <button class="btn-io btn-export" onclick="exportData()">⬇ Esporta JSON</button>
+      <button class="btn-io btn-import" onclick="document.getElementById('importInput').click()">⬆ Importa JSON</button>
+      <input type="file" id="importInput" accept=".json" style="display:none" onchange="importData(event)">
+    </div>
+    <div class="io-feedback" id="ioFeedback"></div>
 
     <div class="stat-cards">
       <div class="stat-card">
@@ -840,6 +884,70 @@ function confirmReset() {
     localStorage.removeItem(DB_KEY);
     renderStats();
   }
+}
+
+// ═══════════════════════════════════════════════
+// EXPORT / IMPORT
+// ═══════════════════════════════════════════════
+function exportData() {
+  const db = loadDB();
+  const json = JSON.stringify(db, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const date = new Date().toISOString().slice(0,10);
+  a.download = 'kana-progressi-' + date + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  showFeedback('✓ Esportato correttamente', 'var(--green)');
+}
+
+function importData(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if (typeof imported !== 'object' || imported === null) throw new Error();
+      // Merge: per ogni kana, tieni il record con più ripetizioni (il più aggiornato)
+      const current = loadDB();
+      let merged = { ...current };
+      for (const [key, val] of Object.entries(imported)) {
+        if (key.startsWith('__')) {
+          // Metadati: somma i contatori, tieni lo streak più alto
+          if (key === '__sessions')      merged[key] = (current[key] || 0) + (val || 0);
+          else if (key === '__totalCorrect') merged[key] = (current[key] || 0) + (val || 0);
+          else if (key === '__totalWrong')   merged[key] = (current[key] || 0) + (val || 0);
+          else if (key === '__streak')    merged[key] = Math.max(current[key] || 0, val || 0);
+          else if (key === '__lastDay')   merged[key] = val; // prendi il più recente
+        } else {
+          // Dati kana: tieni il record con più ripetizioni
+          const cur = current[key];
+          if (!cur || (val.reps || 0) > (cur.reps || 0)) {
+            merged[key] = val;
+          }
+        }
+      }
+      saveDB(merged);
+      showFeedback('✓ Importato e unito correttamente', 'var(--green)');
+      renderStats();
+    } catch {
+      showFeedback('✗ File non valido', 'var(--red)');
+    }
+    // reset input so same file can be re-imported
+    event.target.value = '';
+  };
+  reader.readAsText(file);
+}
+
+function showFeedback(msg, color) {
+  const el = document.getElementById('ioFeedback');
+  el.textContent = msg;
+  el.style.color = color;
+  el.style.opacity = '1';
+  setTimeout(() => { el.style.opacity = '0'; }, 3000);
 }
 
 // ═══════════════════════════════════════════════
